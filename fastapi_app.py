@@ -389,4 +389,20 @@ async def render_endpoint(
         "threads": [{"no":t["Thread_No"], "name":t["Thread_Name"],
                      "rgb":t["RGB"], "hex": rgb_hex(t["RGB"])} for t in threads]
     }
-    return JSONResponse({"image_url": url, "meta": meta})
+   return JSONResponse({
+    "image_url": url,
+    "markdown": f"![HAZZYS Preview]({url})",
+    "summary_table": (
+        f"| 항목 | 값 |\n"
+        f"|------|----|\n"
+        f"| fabric_rgb | {fabric_rgb} / {rgb_hex(fabric_rgb)} |\n"
+        f"| 26ss_code | {pick} |\n"
+        f"| h_rgb | {h_rgb} / {rgb_hex(h_rgb)} |\n"
+        f"| include_top4 | {include_top4} |\n"
+        f"| use_fixed | {use_fixed} |\n"
+        f"| threads | " + ", ".join(f"{t['Thread_No']} {t['Thread_Name']} ({rgb_hex(t['RGB'])})" for t in threads) + " |"
+    ),
+    "meta": meta
+})
+
+
