@@ -1,27 +1,73 @@
-Thread_No,Thread_Name,R,G,B
-26SS_01,26SS_COLOR_01,229,227,217
-26SS_02,26SS_COLOR_02,222,211,187
-26SS_03,26SS_COLOR_03,183,157,113
-26SS_04,26SS_COLOR_04,151,117,90
-26SS_05,26SS_COLOR_05,149,157,128
-26SS_06,26SS_COLOR_06,99,82,63
-26SS_07,26SS_COLOR_07,238,246,182
-26SS_08,26SS_COLOR_08,236,152,121
-26SS_09,26SS_COLOR_09,185,52,66
-26SS_10,26SS_COLOR_10,152,43,53
-26SS_11,26SS_COLOR_11,244,198,227
-26SS_12,26SS_COLOR_12,205,47,94
-26SS_13,26SS_COLOR_13,195,164,221
-26SS_14,26SS_COLOR_14,73,44,96
-26SS_15,26SS_COLOR_15,121,156,132
-26SS_16,26SS_COLOR_16,50,135,101
-26SS_17,26SS_COLOR_17,23,69,56
-26SS_18,26SS_COLOR_18,155,192,204
-26SS_19,26SS_COLOR_19,126,146,170
-26SS_20,26SS_COLOR_20,135,166,196
-26SS_21,26SS_COLOR_21,80,129,208
-26SS_22,26SS_COLOR_22,31,32,79
-26SS_23,26SS_COLOR_23,185,186,188
-26SS_24,26SS_COLOR_24,143,140,137
-26SS_25,26SS_COLOR_25,65,69,70
-26SS_26,26SS_COLOR_26,28,21,22
+# -------------------- 26SS 로직 (csv 모듈로 읽음; 여러 스키마 지원) --------------------
+def load_26ss_logic(path: str) -> Dict:
+    """
+    지원 스키마:
+      A) code,h_r,h_g,h_b[,fabric_r,fabric_g,fabric_b]
+      B) code,h_hex[,fabric_hex]
+      C) Thread_No,Thread_Name,R,G,B   ← 지금 올리신 형식 (Thread_No를 code로 간주, R/G/B를 h_rgb로 사용)
+    반환: {"codes": [...], "h_map": {code: (r,g,b)}, "swatch_map": {code: (r,g,b)}}
+    """
+    h_map, swatch_map, codes = {}, {}, []
+    if not os.path.exists(path):
+        # CSV가 없어도 최소 동작
+        for c in ["26SS_08","26SS_09","26SS_12"]:
+            h_map[c] = (33,83,145)
+            codes.append(c)
+        return {"codes": codes, "h_map": h_map, "swatch_map": swatch_map}
+
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        # 구분자 자동 감지(콤마/세미콜론/탭 모두 허용)
+        sample = f.read(4096); f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(f, dialect=dialect)
+
+        for row in reader:
+            r = { (k or "").strip().lower(): (v.strip() if isinstance(v,str) else v) for k,v in row.items() }
+
+            # 형식 C: Thread_No,Thread_Name,R,G,B  (지금 파일)
+            if "thread_no" in r and all(k in r for k in ("r","g","b")):
+                code = r["thread_no"]
+                try:
+                    h_rgb = (int(float(r["r"])), int(float(r["g"])), int(float(r["b"])))
+                except Exception:
+                    continue
+                h_map[code] = h_rgb
+                codes.append(code)
+                # fabric swatch는 없음(필수 아님)
+                continue
+
+            # 형식 A/B: code + h_rgb/hex (+옵션 fabric)
+            if "code" in r:
+                code = r["code"]
+                if r.get("h_hex"):
+                    try:
+                        h_rgb = hex_rgb(r["h_hex"])
+                    except Exception:
+                        continue
+                elif all(k in r for k in ("h_r","h_g","h_b")):
+                    try:
+                        h_rgb = (int(float(r["h_r"])), int(float(r["h_g"])), int(float(r["h_b"])))
+                    except Exception:
+                        continue
+                else:
+                    continue
+                h_map[code] = h_rgb
+                codes.append(code)
+
+                # fabric swatch(자동 선택 개선용)
+                if all(k in r for k in ("fabric_r","fabric_g","fabric_b")):
+                    try:
+                        fr = int(float(r["fabric_r"])); fg = int(float(r["fabric_g"])); fb = int(float(r["fabric_b"]))
+                        swatch_map[code] = (fr,fg,fb)
+                    except Exception:
+                        pass
+                elif r.get("fabric_hex"):
+                    try:
+                        swatch_map[code] = hex_rgb(r["fabric_hex"])
+                    except Exception:
+                        pass
+
+    return {"codes": sorted(set(codes)), "h_map": h_map, "swatch_map": swatch_map}
