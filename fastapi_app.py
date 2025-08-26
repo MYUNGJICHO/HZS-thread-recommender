@@ -156,15 +156,33 @@ async def render_endpoint(request: Request,
         f"| use_fixed | {use_fixed} |\n"
         f"| threads | " + ", ".join(f"{t['Thread_No']} {t['Thread_Name']} ({rgb_hex(t['RGB'])})" for t in threads) + " |"
     )
-    return JSONResponse({
-        "image_data": data_uri,
-        "summary_table": summary,
-        "meta": {
-            "fabric_rgb": {"rgb": list(fabric_rgb), "hex": rgb_hex(fabric_rgb)},
-            "26ss_code": pick,
-            "h_rgb": {"rgb": list(h_rgb), "hex": rgb_hex(h_rgb)},
-            "include_top4": include_top4,
-            "use_fixed": use_fixed,
-            "threads": threads
-        }
-    })
+   import base64
+
+# 이미지 resize + 압축 + Base64 인코딩
+buf = io.BytesIO()
+img = img.resize((800, 450))  # 👈 해상도 축소
+img.convert("RGB").save(buf, "JPEG", quality=85)  # 👈 JPEG 압축 저장
+data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+# 요약 표 문자열 생성
+summary_table = (
+    "| 항목 | 값 |\n"
+    "|------|----|\n"
+    f"| fabric_rgb | {fabric_rgb}, {rgb_hex(fabric_rgb)} |\n"
+    f"| 26ss_code | {pick} |\n"
+    f"| h_rgb | {h_rgb}, {rgb_hex(h_rgb)} |\n"
+    f"| include_top4 | {include_top4} |\n"
+    f"| use_fixed | {use_fixed} |\n"
+    f"| threads | " + ", ".join(
+        f"{t['Thread_No']} {t['Thread_Name']} ({rgb_hex(t['RGB'])})"
+        for t in threads
+    ) + " |"
+)
+
+# 반환
+return JSONResponse({
+    "image_data": data_uri,
+    "summary_table": summary_table,
+    "meta": meta
+})
+
