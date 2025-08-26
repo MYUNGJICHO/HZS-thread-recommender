@@ -1,19 +1,38 @@
 # fastapi_app.py
-# 원단 이미지 업로드 → 지배색 추출 → 26SS 'h' 글씨색 적용(+옵션: 실 Top4) → 결과 이미지 저장 → URL 반환
-import os, io, uuid, csv, math
+# 원단 이미지 업로드 → 지배색 추출 → 26SS 'h' 글씨색 적용(+옵션: 고정 TOP4/실북 TOP4) → 결과 이미지 저장 → URL 반환
+import os, io, uuid, csv, math, re
 from datetime import datetime
 from typing import Dict, Tuple, List, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw, ImageFont
 
 # -------------------- 설정 --------------------
 OUTPUT_DIR = "outputs"
-LOGIC_CSV = os.getenv("LOGIC_CSV", "26SS_logic_final.csv")            # 26개 코드/색 CSV (없어도 동작)
+LOGIC_CSV = os.getenv("LOGIC_CSV", "26SS_logic_final.csv")                 # 26개 코드/색 CSV (없어도 동작)
 THREADBOOK_CSV = os.getenv("THREADBOOK_CSV", "imjae_threadbook_full.csv")  # 실북 CSV (없어도 동작)
-API_KEY = os.getenv("API_KEY")                                        # 배포 시 보안키(로컬 테스트면 비워도 OK)
+API_KEY = os.getenv("API_KEY")                                             # 배포 시 보안키(로컬 테스트면 비워도 OK)
+
+# 08/09/12는 파란 h(LOYAL BLUE)로 고정 적용 — 기본 ON (원하면 USE_CURATED_H=0 으로 끌 수 있음)
+USE_CURATED_H = os.getenv("USE_CURATED_H", "1").lower() in ("1", "true", "yes")
+CURATED_H: Dict[str, Tuple[int,int,int]] = {
+    "26SS_08": (33,83,145),
+    "26SS_09": (33,83,145),
+    "26SS_12": (33,83,145),
+}
+
+# 고정 추천셋(그룹6) — Electric Grey + 3 Blue
+FIXED_RECS: Dict[str, List[Dict]] = {
+    c: [
+        {"Thread_No":"14846","Thread_Name":"ELECTRIC GREY","RGB":(140,140,140)},
+        {"Thread_No":"16292","Thread_Name":"SECRET BLUE","RGB":(18,69,139)},
+        {"Thread_No":"13643","Thread_Name":"MAGIC BLUE","RGB":(25,77,142)},
+        {"Thread_No":"16296","Thread_Name":"LOYAL BLUE","RGB":(33,83,145)},
+    ] for c in ("26SS_08","26SS_09","26SS_12")
+}
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # -------------------- 글꼴 --------------------
@@ -56,6 +75,16 @@ def extract_dominant_rgb(img_pil: Image.Image, k: int = 6) -> Tuple[int,int,int]
 def euclid(a: Tuple[int,int,int], b: Tuple[int,int,int]) -> float:
     return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
 
+def normalize_ss_code(s: str) -> str:
+    """'09', 'ss9' 같은 입력을 '26SS_09'로 정규화"""
+    s = (s or "").strip().upper()
+    if s == "AUTO": return "auto"
+    nums = re.findall(r"\d+", s)
+    if nums:
+        n = int(nums[-1])
+        return f"26SS_{n:02d}"
+    return s
+
 # -------------------- 26SS 로직 (여러 스키마 지원) --------------------
 def load_26ss_logic(path: str) -> Dict:
     """
@@ -63,28 +92,27 @@ def load_26ss_logic(path: str) -> Dict:
       A) code,h_r,h_g,h_b[,fabric_r,fabric_g,fabric_b]
       B) code,h_hex[,fabric_hex]
       C) Thread_No,Thread_Name,R,G,B   ← 이 형식 지원(Thread_No를 code, R/G/B를 h_rgb로 사용)
-    반환: {"codes": [...], "h_map": {code: (r,g,b)}, "swatch_map": {code: (r,g,b)}}
+    반환: {"codes":[...], "h_map":{code:(r,g,b)}, "swatch_map":{code:(r,g,b)}}
     """
     h_map, swatch_map, codes = {}, {}, []
     if not os.path.exists(path):
+        # CSV가 없어도 최소 동작
         for c in ["26SS_08","26SS_09","26SS_12"]:
             h_map[c] = (33,83,145)
             codes.append(c)
         return {"codes": codes, "h_map": h_map, "swatch_map": swatch_map}
 
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        # 구분자 자동 감지(콤마/세미콜론/탭 모두 허용)
+    with open(path, "r", encoding="utf-8-sig", newline="}") as f:
         sample = f.read(4096); f.seek(0)
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
         except csv.Error:
             dialect = csv.excel
         reader = csv.DictReader(f, dialect=dialect)
-
         for row in reader:
             r = { (k or "").strip().lower(): (v.strip() if isinstance(v,str) else v) for k,v in row.items() }
 
-            # 형식 C: Thread_No,Thread_Name,R,G,B
+            # 형식 C
             if "thread_no" in r and all(k in r for k in ("r","g","b")):
                 code = r["thread_no"]
                 try:
@@ -95,7 +123,7 @@ def load_26ss_logic(path: str) -> Dict:
                 codes.append(code)
                 continue
 
-            # 형식 A/B: code + h_rgb/hex (+옵션 fabric)
+            # 형식 A/B
             if "code" in r:
                 code = r["code"]
                 # h
@@ -116,8 +144,11 @@ def load_26ss_logic(path: str) -> Dict:
                 # fabric(옵션)
                 if all(k in r for k in ("fabric_r","fabric_g","fabric_b")):
                     try:
-                        fr = int(float(r["fabric_r"])); fg = int(float(r["fabric_g"])); fb = int(float(r["fabric_b"]))
-                        swatch_map[code] = (fr,fg,fb)
+                        swatch_map[code] = (
+                            int(float(r["fabric_r"])),
+                            int(float(r["fabric_g"])),
+                            int(float(r["fabric_b"]))
+                        )
                     except Exception:
                         pass
                 elif r.get("fabric_hex"):
@@ -147,7 +178,9 @@ def load_threadbook(path: str) -> Optional[List[Dict]]:
                 rows.append({
                     "Thread_No": r["thread_no"],
                     "Thread_Name": r["thread_name"],
-                    "R": int(float(r["r"])), "G": int(float(r["g"])), "B": int(float(r["b"]))
+                    "R": int(float(r["r"])),
+                    "G": int(float(r["g"])),
+                    "B": int(float(r["b"])),
                 })
         return rows if rows else None
     except Exception:
@@ -166,7 +199,7 @@ def nearest_threads(target_rgb: Tuple[int,int,int], rows: List[Dict], top_n: int
         out.append({
             "Thread_No": row["Thread_No"],
             "Thread_Name": row["Thread_Name"],
-            "RGB": (row["R"], row["G"], row["B"])
+            "RGB": (row["R"], row["G"], row["B"]),
         })
     return out
 
@@ -233,7 +266,7 @@ app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
 @app.get("/")
 def root():
-    return {"message": "HAZZYS Embroidery API. See /docs for usage."}
+    return {"message": "HAZZYS Embroidery API. Use /docs or POST /render."}
 
 @app.get("/health")
 def health():
@@ -267,21 +300,30 @@ def _pick_code_auto(
 async def render_endpoint(
     request: Request,
     fabric_image: UploadFile = File(..., description="Fabric image (png/jpg)"),
-    ss_code: str = Form("auto", description="26SS code or 'auto'"),
+    ss_code: str = Form("auto", description="26SS code or 'auto' (e.g., '09' → 26SS_09)"),
     out_format: str = Form("png", description="'png' or 'jpg'"),
-    width: int = Form(1600), height: int = Form(900),
+    width: int = Form(1600),
+    height: int = Form(900),
     include_top4: bool = Form(True),
+    use_fixed: bool = Form(True),  # 08/09/12에서 고정 추천셋 사용 여부(기본 ON)
     _ok: bool = Depends(require_api_key)
 ):
     # 26SS 로직 로드
     logic = load_26ss_logic(LOGIC_CSV)
     codes, h_map, swatch_map = logic["codes"], logic["h_map"], logic["swatch_map"]
 
-    # CSV가 없거나 형식이 달라도 최소 동작(안전 폴백)
+    # CSV 없거나 비정상이어도 최소 동작
     if not codes:
         codes = ["26SS_08","26SS_09","26SS_12"]
         h_map = {c: (33,83,145) for c in codes}
         swatch_map = {}
+
+    # 커스텀 블루 h(08/09/12) 오버라이드
+    if USE_CURATED_H:
+        for c, rgb in CURATED_H.items():
+            h_map[c] = rgb
+            if c not in codes:
+                codes.append(c)
 
     # 이미지 읽기
     raw = await fabric_image.read()
@@ -292,22 +334,33 @@ async def render_endpoint(
 
     fabric_rgb = extract_dominant_rgb(pil)
 
-    # 코드 선택
-    pick = (ss_code or "auto").strip()
-    if pick == "auto" or pick not in h_map:
+    # 코드 선택(정규화 포함)
+    raw_code = normalize_ss_code(ss_code or "auto")
+    if raw_code == "auto" or raw_code not in h_map:
         pick = _pick_code_auto(fabric_rgb, codes, swatch_map, h_map)
-    h_rgb = h_map[pick]
+    else:
+        pick = raw_code
 
-    # 실 Top4 (CSV 없으면 h_rgb 파생 4종으로 대체)
+    # h 컬러 확정(08/09/12는 블루, 그 외는 CSV)
+    h_rgb = CURATED_H.get(pick, h_map[pick])
+
+    # TOP4 선정
     threads: List[Dict] = []
-    tb = THREADBOOK
-    if include_top4 and tb:
+
+    # 1순위: 고정 추천셋(08/09/12 & use_fixed=True)
+    if use_fixed and pick in FIXED_RECS:
+        threads = FIXED_RECS[pick]
+
+    # 2순위: 실북 CSV가 있으면 최근접 Top4
+    if not threads and include_top4 and THREADBOOK:
         try:
-            top4 = nearest_threads(h_rgb, tb, top_n=4)
+            top4 = nearest_threads(h_rgb, THREADBOOK, top_n=4)
             if not looks_suspicious(top4):
                 threads = top4
         except Exception:
             pass
+
+    # 3순위: 폴백(파생 4종)
     if include_top4 and not threads:
         threads = [
             {"Thread_No":"—","Thread_Name":"Nearest-1","RGB":h_rgb},
@@ -332,6 +385,7 @@ async def render_endpoint(
         "26ss_code": pick,
         "h_rgb": {"rgb": h_rgb, "hex": rgb_hex(h_rgb)},
         "include_top4": include_top4,
+        "use_fixed": use_fixed,
         "threads": [{"no":t["Thread_No"], "name":t["Thread_Name"],
                      "rgb":t["RGB"], "hex": rgb_hex(t["RGB"])} for t in threads]
     }
