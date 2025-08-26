@@ -144,8 +144,9 @@ async def render_endpoint(request: Request,
     threads = FIXED_RECS[pick] if use_fixed and pick in FIXED_RECS else nearest_threads(h_rgb, THREADBOOK, 4)
     img = render_preview(fabric_rgb, threads, h_rgb, W=width, H=height)
     buf = io.BytesIO()
-    img.convert("RGB").save(buf, out_format.upper())
-    data_uri = f"data:image/{out_format};base64," + base64.b64encode(buf.getvalue()).decode()
+    img = img.resize((600, 338))  # ✅ 크기 축소
+    img.convert("RGB").save(buf, "JPEG", quality=75)  # ✅ 압축률 높임
+    data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
     summary = (
         "| 항목 | 값 |\n"
         "|------|----|\n"
@@ -185,4 +186,5 @@ return JSONResponse({
     "summary_table": summary_table,
     "meta": meta
 })
+
 
